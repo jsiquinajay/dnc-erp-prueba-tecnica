@@ -42,7 +42,9 @@ class KardexController extends ControladorBase {
      * 
      * ⚠️ ESTE CÓDIGO TIENE PROBLEMAS GRAVES DE PERFORMANCE
      */
-    public function IndexOld() {
+    
+    /*
+    public function Index() {
         
         // Inicializar modelo
         $Datos = new KardexFpdoModel($this->AdapterModel);
@@ -103,9 +105,9 @@ class KardexController extends ControladorBase {
             'datos' => $resultados,
             'total_productos' => count($resultados)
         ]);
-    }
+    }*/
     
-    public function Index() {
+    public function IndexOld() {
         // Inicializar modelo
         $Datos = new KardexFpdoModel($this->AdapterModel);
 
@@ -135,7 +137,7 @@ class KardexController extends ControladorBase {
             ->select('SUM(CASE WHEN k.tipo = \'salida\' THEN k.cantidad ELSE 0 END) as total_salidas')
             //Se pondera el costo promedio del stock actual
             //Calcula el costo promedio ponderado de un producto basándose en todas sus entradas históricas
-            ->select('CASE WHEN SUM(CASE WHEN k.tipo = \'entrada\' THEN k.cantidad ELSE k.cantidad END) > 0
+            ->select('CASE WHEN SUM(CASE WHEN k.tipo = \'entrada\' THEN -k.cantidad ELSE k.cantidad END) > 0
                     THEN SUM(CASE 
                         WHEN k.tipo = \'entrada\' THEN k.cantidad * k.precio_unitario
                         ELSE 0
@@ -177,6 +179,103 @@ class KardexController extends ControladorBase {
             'datos' => $resultados,
             'total_productos' => count($resultados)
         ]);
+    }
+    
+    public function Index() {
+        $Datos = new KardexFpdoModel($this->AdapterModel);
+
+        //Paginacion
+        $filasPorPagina = 14;
+        //validacion de entero y evitar simbolos extraños
+        $miPagina = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT) ?: 1; 
+        $offset = ($miPagina - 1) * $filasPorPagina;
+
+        //Total de productos obtenidos
+        $totalProductos = $Datos->fluent()
+            ->from('productos')
+            ->select(null)
+            ->select('COUNT(*) as total')
+            ->fetch()['total'];
+
+        //Se redondean los paginas en caso de tener decimales
+        $totalPaginas = ceil($totalProductos / $filasPorPagina);
+         
+        $productos = $Datos->fluent()
+        ->from('productos p')
+        ->leftJoin('kardex k ON p.id = k.producto_id')
+        ->select('
+            p.id,
+            p.nombre,
+            COALESCE(SUM(CASE 
+                WHEN k.tipo = "entrada" THEN k.cantidad 
+                ELSE 0 
+            END), 0) as total_entradas,
+
+            COALESCE(SUM(CASE 
+                WHEN k.tipo = "salida" THEN k.cantidad 
+                ELSE 0 
+            END), 0) as total_salidas,
+
+            COALESCE(SUM(CASE 
+                WHEN k.tipo = "entrada" THEN k.cantidad 
+                ELSE -k.cantidad 
+            END), 0) as existencia,
+
+            COALESCE(
+                SUM(CASE 
+                    WHEN k.tipo = "entrada" 
+                    THEN k.precio_unitario * k.cantidad 
+                    ELSE 0 
+                END)
+                /
+                NULLIF(
+                    SUM(CASE 
+                        WHEN k.tipo = "entrada" 
+                        THEN k.cantidad 
+                        ELSE 0 
+                    END),
+                0),
+            0) as costo_promedio')
+            ->groupBy('p.id')
+            ->limit($filasPorPagina)
+            ->offset($offset);
+
+        $resultados = [];
+        
+        foreach ($productos as $producto) {
+            $resultados[] = [
+                'producto_id' => $producto['id'],
+                'codigo' => $producto['codigo'],
+                'producto' => $producto['nombre'],
+                'entradas' => $producto['total_entradas'],
+                'salidas' => $producto['total_salidas'],
+                'existencia' => $producto['existencia'],
+                'costo_promedio' => $producto['costo_promedio']
+            ];
+        }
+       
+        $this->view('Kardex/IndexView', [
+            'datos' => $resultados,
+            'paginaActual' => $miPagina,
+            'totalPaginas' => $totalPaginas
+        ]);
+    }
+    
+    private function calcularCostoPromedio($producto_id) {
+
+        $Datos = new KardexFpdoModel($this->AdapterModel);
+
+        $resultado = $Datos->fluent()
+            ->from('kardex')
+            ->select('
+                COALESCE(SUM(precio_unitario * cantidad) / 
+                NULLIF(SUM(cantidad),0), 0) as costo_promedio
+            ')
+            ->where('producto_id = ?', $producto_id)
+            ->where('tipo = ?', 'entrada')
+            ->fetch();
+
+        return $resultado['costo_promedio'] ?? 0;
     }
     
     /**
