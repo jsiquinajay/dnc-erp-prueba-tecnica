@@ -68,7 +68,8 @@ class TransformacionController extends ControladorBase {
      * 
      * ⚠️ ESTE CÓDIGO TIENE UN BUG CRÍTICO
      */
-    public function ProcesarTransformacion() {
+    
+    /*public function ProcesarTransformacionOld() {
         
         // Validar token CSRF
         if (!$this->ValToken()) {
@@ -170,6 +171,180 @@ class TransformacionController extends ControladorBase {
                 'Error' => 'Error al procesar transformación'
             ]);
         }
+    }*/
+    
+    public function ProcesarTransformacion(array $datos): array {
+        // Validar token CSRF
+        if (!$this->ValToken()) {
+            echo json_encode([
+                'Result' => '0',
+                'Error' => 'Token inválido'
+            ]);
+            return;
+        }
+        
+        //ID Cereza --> producto_entrada_id
+        //Cereza    --> Cantidad a procesar (cantidad_entrada)
+        //ID Pergamino --> $producto_salida_id
+        $requiredField = ['producto_entrada_id', 'cantidad_entrada', 'producto_salida_id', 'bodega_id'];
+        
+        foreach ($requiredField as $field) {
+            if (!isset($datos[$field])) {
+                throw new \InvalidArgumentException("El campo es requerido: {$field}");
+            }
+        }
+        
+        $factor_rendimiento = $datos['rendimiento'] ?? $this->calcularRendimientoEstandard(
+            $datos['producto_entrada_id'],
+            $datos['producto_salida_id']
+        );
+
+        $fecha_actual = date('Y-m-d H:i:s');
+        $usuario_id = $_SESSION['User_ID'];
+        $transformacion_id = uniqid('TRX-'); //Se vinculan los registros
+        
+        $cantidad_salida = $datos['cantidad_entrada'] * $factor_rendimiento;
+        $cantidad_merma = $datos['cantidad_entrada'] - $cantidad_salida;
+
+        $Datos = new KardexFpdoModel($this->AdapterModel);
+        $db = $Datos->fluent()->getPdo(); // Obtenemos el objeto PDO para la transacción
+
+        try {
+            //Se inicia transaccion
+            $db->beginTransaction();
+
+            //Salida de materia prima (Cereza)
+            $result1 = $Datos->fluent()->insertInto('kardex', [
+                'producto_id'      => $datos['producto_entrada_id'],
+                'cantidad'         => $datos['cantidad_entrada'],
+                'tipo'             => 'salida',
+                //Se obtiene el precio del producto mas actual
+                'precio_unitario' => $this->calcularCostoProducto($datos['producto_entrada_id']),
+                'bodega_id'        => $datos['bodega_id'],
+                'fecha'            => $fecha_actual,
+                'usuario_id'       => $usuario_id,
+                'transformacion_id'=> $transformacion_id,
+                'observaciones'    => 'Salida por proceso de transformación'
+            ])->execute();
+
+            //Entrada de producto terminado (Pergamino)
+            $result2 = $Datos->fluent()->insertInto('kardex', [
+                'producto_id'      => $datos['producto_salida_id'] ,
+                'cantidad'         => $cantidad_salida,
+                'tipo'             => 'entrada', 
+                'precio_unitario' => $this->calcularNuevoCosto(
+                        $datos['producto_entrada_id'],
+                        $datos['producto_salida_id'],
+                        $datos['cantidad_entrada'],
+                        $factor_rendimiento),
+                'bodega_id'        => $datos['bodega_id'],
+                'fecha'            => $fecha_actual,
+                'usuario_id'       => $usuario_id,
+                'transformacion_id'=> $transformacion_id,
+                'rendimiento'      => $factor_rendimiento,
+                'merma'            => $cantidad_merma,
+                'observaciones'    => "Entrada de transformación (Pergamino). Merma: $cantidad_merma"
+            ])->execute();
+
+            if ($cantidad_merma > 0) {
+                //Se registra merma si aplica
+                $result3= $Datos->fluent()->insertInto('transformaciones',[
+                    'producto_entrada_id' => $datos['producto_entrada_id'], 
+                    'cantidad_entrada' => $datos['cantidad_entrada'],
+                    'cantidad_salida' => $datos['producto_salida_id'], 
+                    'merma' => $cantidad_merma,
+                    'rendimiento' => $factor_rendimiento,
+                    'costo_transformacion' => $cantidad_merma,
+                    'bodega_id' => $datos['bodega_id'],
+                    'fecha' => $fecha_actual,
+                    'usuario_id' => $datos['usuario_id']])
+                ->execute();
+            }
+
+            $Datos->fluent()->commit();
+            
+            //Se retorna el resultado
+            if ($result1 && $result2 && $result3) {
+                echo json_encode([
+                    'Result' => '1',
+                    'Message' => 'Registro procesado exitosamente'
+                ]);
+            } else {
+                echo json_encode([
+                    'Result' => '0',
+                    'Error' => 'Error al procesar transformación'
+                ]);
+            }
+
+        } catch (Exception $e) {
+           //Rollback en caso de error
+            $Datos->fluent()->rollBack();
+            error_log("Error al procesar transformación: " . $e->getMessage());
+            
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+                'code' => $e->getCode()
+            ];
+        }
+    }
+    
+    private function calcularRendimientoEstandard(int $productoEntradaId, int $productoSalidaId): float
+    {
+        // Valores de rendimientos estándard (ids de productos)
+        $rendimientos = [
+            //Cereza -> Pergamino
+            '45:67' => 0.85, // 85% rendimiento
+            //Pergamino -> Oro
+            '67:89' => 0.80, // 80% rendimiento
+            //Default: 100% (sin merma)
+            'default' => 1.0
+        ];
+        
+        $key = "{$productoEntradaId}:{$productoSalidaId}";
+        return $rendimientos[$key] ?? $rendimientos['default'];
+    }
+    
+    private function calcularNuevoCosto(int $productoEntradaId, int $productoSalidaId, float $cantidad, float $rendimiento): float
+    {
+        //Se obtiene el costo de transformacion
+        $costo_transformacion = $this->obtenerCostoTransformacion($productoSalidaId);
+        //Se calcula el costo basado en materia prima + costos de transformación
+        $costo_materia_prima = $this->calcularCostoProducto($productoEntradaId) * $cantidad;
+
+        $costo_total = $costo_materia_prima + $costo_transformacion;
+        $cantidad_producida = $cantidad * $rendimiento;
+        
+        return $cantidad_producida > 0 ? $costo_total / $cantidad_producida : 0;
+    }
+    
+    private function calcularCostoProducto(int $productoId): float
+    {
+        $precio_unitario = $Datos->fluent()
+            ->from('kardex k',)
+            ->select('k.precio_unitario')  
+            ->where('k.producto_id = ?',$productoId)    
+            ->where('EXISTS (
+                SELECT 1 FROM productos p 
+                WHERE p.id = k.producto_id AND p.estado = 1)')
+            ->orderBy('ORDER BY k.fecha DESC')  
+            ->limit(1)    
+            ->fetchAll();
+            
+         return (float) $precio_unitario['precio_unitario'] ?? 0;
+    }
+    
+    private function obtenerCostoTransformacion(int $productoId): float
+    {
+        $costo_transformacion = $Datos->fluent()
+            ->from('transformaciones t',)
+            ->select('t.costo_transformacion')  
+            ->where('t.producto_id = ?',$productoId)    
+            ->orderBy('ORDER BY t.fecha DESC')  
+            ->limit(1)
+            ->fetchAll();
+            
+         return (float) $costo_transformacion['costo_transformacion'] ?? 0;
     }
     
     /**
