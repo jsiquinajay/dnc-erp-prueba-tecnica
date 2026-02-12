@@ -42,7 +42,7 @@ class KardexController extends ControladorBase {
      * 
      * ⚠️ ESTE CÓDIGO TIENE PROBLEMAS GRAVES DE PERFORMANCE
      */
-    public function Index() {
+    public function IndexOld() {
         
         // Inicializar modelo
         $Datos = new KardexFpdoModel($this->AdapterModel);
@@ -105,6 +105,80 @@ class KardexController extends ControladorBase {
         ]);
     }
     
+    public function Index() {
+        // Inicializar modelo
+        $Datos = new KardexFpdoModel($this->AdapterModel);
+
+        //Se obtienen los productos activos
+        $productos = $Datos->fluent()
+            ->from('productos')
+            ->select('id')  
+            ->select('codigo')     
+            ->select('nombre')  
+            ->where('estado = ?', 1)
+            ->orderBy('ORDER BY nombre')       
+            ->fetchAll();
+        
+        if (empty($productos)) {
+            return [];
+        }
+        
+        //Se preparan los ids (productos) para ejecutarlos en el IN
+        $productoIds = array_column($productos, 'id');
+        $placeholders = str_repeat('?,', count($productoIds) - 1) . '?';
+        
+        //Se obtienen los movimientos agrupados por productos
+        $movimientos = $Datos->fluent()
+            ->from('kardex k',)
+            ->select('k.producto_id')   
+            ->select('SUM(CASE WHEN k.tipo = \'\entrada\'\ THEN k.cantidad ELSE 0 END) as total_entradas')  
+            ->select('SUM(CASE WHEN k.tipo = \'salida\' THEN k.cantidad ELSE 0 END) as total_salidas')
+            //Se pondera el costo promedio del stock actual
+            //Calcula el costo promedio ponderado de un producto basándose en todas sus entradas históricas
+            ->select('CASE WHEN SUM(CASE WHEN k.tipo = \'entrada\' THEN k.cantidad ELSE k.cantidad END) > 0
+                    THEN SUM(CASE 
+                        WHEN k.tipo = \'entrada\' THEN k.cantidad * k.precio_unitario
+                        ELSE 0
+                    END) / SUM(CASE WHEN k.tipo = \'entrada\' THEN k.cantidad ELSE 0 END)
+                    ELSE 0
+                END as costo_promedio')      
+            ->where('k.producto_id IN ?', $placeholders)
+            ->groupBy(' GROUP BY k.producto_id')       
+            ->fetchAll();
+        
+        //Array para almacenar resultados
+        $resultados = [];
+        
+        //Se combinan los resultados manteniendo compatibilidad
+        foreach ($productos as $producto) {
+            $productoId = $producto['id'];
+            $movimiento = $movimientos[$productoId][0] ?? null;
+            
+            if ($movimiento) {
+                $existencia = $movimiento['total_entradas'] - $movimiento['total_salidas'];
+                $costoPromedio = $existencia > 0 ? $movimiento['costo_promedio'] : 0;
+            } else {
+                $existencia = 0;
+                $costoPromedio = 0;
+            }
+            
+            $resultados[] = [
+                'producto_id' => $producto['id'],
+                'codigo' => $producto['codigo'],
+                'producto' => $producto['nombre'],
+                'existencia' => $existencia,
+                'costo' => $costoPromedio
+            ];
+        }
+        
+        // Renderizar vista con resultados
+        // El template mostrará una tabla HTML
+        $this->view('Kardex/IndexView', [
+            'datos' => $resultados,
+            'total_productos' => count($resultados)
+        ]);
+    }
+    
     /**
      * CALCULAR COSTO PROMEDIO
      * 
@@ -120,6 +194,8 @@ class KardexController extends ControladorBase {
      * @param int $producto_id ID del producto
      * @return float Costo promedio
      */
+    
+    /*
     private function calcularCostoPromedio($producto_id) {
         
         // Crear nueva instancia del modelo
@@ -153,7 +229,7 @@ class KardexController extends ControladorBase {
         $promedio = $cantidad_total > 0 ? $suma_total / $cantidad_total : 0;
         
         return round($promedio, 2);
-    }
+    }*/
     
     /**
      * MÉTODO ALTERNATIVO (No se usa, pero existe en el código)
